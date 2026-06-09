@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Built Game</title>
+  <style>
+    body { margin: 0; background: #0f172a; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; touch-action: none; font-family: sans-serif; }
+    #game-container { position: relative; width: 100%; max-width: 800px; aspect-ratio: 4/3; box-shadow: 0 0 30px rgba(0,0,0,0.8); }
+    canvas { background: #1e293b; width: 100%; height: 100%; display: block; border-radius: 8px; }
+  </style>
+  <script>
+    // 外部スクリプトファイルを受け取るための配列と登録関数
+    window._gameScripts = [];
+    window._registerGameScript = function(fn) {
+      window._gameScripts.push(fn);
+    };
+  </script>
+  <!-- 各スクリプトファイルの読み込み -->
+  <script src="./script/main.js"></script>
+</head>
+<body>
+  <div id="game-container">
+    <canvas id="game-canvas" width="800" height="600"></canvas>
+  </div>
+  <script>
+    // --- Engine Utilities ---
+    
+        const getCanvasPos = (canvas, worldX, worldY) => {
+      return {
+        cx: canvas.width / 2 + worldX,
+        cy: canvas.height / 2 - worldY
+      };
+    };
+        const getMouseWorldPos = (canvas, clientX, clientY) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const cx = (clientX - rect.left) * scaleX;
+      const cy = (clientY - rect.top) * scaleY;
+      return {
+        wx: cx - canvas.width / 2,
+        wy: canvas.height / 2 - cy
+      };
+    };
+        const getCanvasPosCamera = (canvas, worldX, worldY, camera, shakeX, shakeY) => {
+      return {
+        cx: canvas.width / 2 + (worldX - camera.x) * camera.zoom + shakeX,
+        cy: canvas.height / 2 - (worldY - camera.y) * camera.zoom + shakeY
+      };
+    };
+        const getMouseWorldPosCamera = (canvas, clientX, clientY, camera) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const cx = (clientX - rect.left) * scaleX;
+      const cy = (clientY - rect.top) * scaleY;
+      return {
+        wx: (cx - canvas.width / 2) / camera.zoom + camera.x,
+        wy: (canvas.height / 2 - cy) / camera.zoom + camera.y
+      };
+    };
+        const createEngineAPI = function createEngineAPI(ctx, canvas, loadedImages, loadedSounds, inputState, cameraState, callbacks, customLogFn) {
+      // 🌟変更: コールバックを配列化して複数登録可能にする
+      let userInits = [];
+      let userUpdates = [];
+      let messageListeners = {}; // メッセージ送受信用
+
+      let shakePower = 0;
+      let totalTime = 0;
+      let frameCount = 0;
+      let currentDt = 0;
+
+      const applyCamera = (wx, wy) => {
+        const shakeX = shakePower > 0 ? (Math.random() - 0.5) * shakePower : 0;
+        const shakeY = shakePower > 0 ? (Math.random() - 0.5) * shakePower : 0;
+        return getCanvasPosCamera(canvas, wx, wy, cameraState, shakeX, shakeY);
+      };
+
+      const Engine = {
+        _getUserInits: () => userInits,
+        _getUserUpdates: () => userUpdates,
+        _updateEngineTime: (dt) => {
+          currentDt = dt; totalTime += dt; frameCount++;
+          if(shakePower > 0) { shakePower *= 0.9; if(shakePower < 0.5) shakePower = 0; }
+        },
+
+        // 🌟変更: 上書きではなく配列に追加する
+        setInit: (fn) => { userInits.push(fn); },
+        setUpdate: (fn) => { userUpdates.push(fn); },
+        onClick: (fn) => { callbacks.onClick.push(fn); },
+        onKeyDown: (fn) => { callbacks.onKeyDown.push(fn); },
+        onKeyUp: (fn) => { callbacks.onKeyUp.push(fn); },
+        
+        // 🌟新規: メッセージパッシングAPI
+        sendMessage: (type, data) => {
+          if (messageListeners[type]) {
+            messageListeners[type].forEach(cb => cb(data));
+          }
+        },
+        receiveMessage: (type, cb) => {
+          if (!messageListeners[type]) messageListeners[type] = [];
+          messageListeners[type].push(cb);
+        },
+
+        Camera: cameraState,
+        Effect: { shake: (power) => { shakePower = power; } },
+        Storage: {
+          save: (key, val) => { try { localStorage.setItem('game_save_' + key, JSON.stringify(val)); } catch(e){} },
+          load: (key, defVal) => { try { const d = localStorage.getItem('game_save_' + key); return d ? JSON.parse(d) : defVal; } catch(e){ return defVal; } }
+        },
+        Time: {
+          get deltaTime() { return currentDt; },
+          get frameCount() { return frameCount; },
+          get time() { return totalTime; }
+        },
+        
+        clear: (color = '#000') => {
+          ctx.fillStyle = color;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        },
+        hasCostume: (name) => !!loadedImages[name],
+        hasSound: (name) => !!loadedSounds[name],
+        
+        // --- 描画 (中心基準・カメラ対応) ---
+        draw: (name, x, y, width, height, angle = 0) => {
+          const img = loadedImages[name];
+          if (!img) return;
+          const { cx, cy } = applyCamera(x, y);
+          ctx.save();
+          ctx.translate(cx, cy);
+          // Canvasは時計回りが正だが、デカルト座標では反時計回りが正のためマイナスにする
+          ctx.rotate((-angle * Math.PI) / 180);
+          ctx.drawImage(img, -(width * cameraState.zoom) / 2, -(height * cameraState.zoom) / 2, width * cameraState.zoom, height * cameraState.zoom);
+          ctx.restore();
+        },
+        drawRect: (x, y, w, h, color = '#fff', fill = true) => {
+          const { cx, cy } = applyCamera(x, y);
+          const cw = w * cameraState.zoom;
+          const ch = h * cameraState.zoom;
+          ctx.fillStyle = color; ctx.strokeStyle = color;
+          if (fill) ctx.fillRect(cx - cw/2, cy - ch/2, cw, ch);
+          else ctx.strokeRect(cx - cw/2, cy - ch/2, cw, ch);
+        },
+        drawCircle: (x, y, r, color = '#fff', fill = true) => {
+          const { cx, cy } = applyCamera(x, y);
+          const cr = r * cameraState.zoom;
+          ctx.beginPath(); ctx.arc(cx, cy, cr, 0, Math.PI * 2);
+          ctx.fillStyle = color; ctx.strokeStyle = color;
+          if (fill) ctx.fill(); else ctx.stroke();
+        },
+        drawLine: (x1, y1, x2, y2, color = '#fff', width = 2) => {
+          const p1 = applyCamera(x1, y1);
+          const p2 = applyCamera(x2, y2);
+          ctx.beginPath();
+          ctx.moveTo(p1.cx, p1.cy);
+          ctx.lineTo(p2.cx, p2.cy);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = width * cameraState.zoom;
+          ctx.stroke();
+        },
+        drawText: (text, x, y, size = 20, color = '#fff') => {
+          const { cx, cy } = applyCamera(x, y);
+          ctx.fillStyle = color; ctx.font = `bold ${size * cameraState.zoom}px "Segoe UI", sans-serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(text, cx, cy);
+        },
+        // --- UI描画 (カメラ無視) ---
+        drawUIText: (text, x, y, size = 20, color = '#fff') => {
+          const { cx, cy } = getCanvasPos(canvas, x, y);
+          ctx.fillStyle = color; ctx.font = `bold ${size}px "Segoe UI", sans-serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillText(text, cx, cy);
+        },
+        drawTextBox: (text, x, y, width, height, options = {}) => {
+          const { fontSize = 20, fontColor = '#fff', bgColor = 'rgba(0,0,0,0.8)', borderColor = '#fff', borderWidth = 2, padding = 10, lineHeight = 1.5 } = options;
+          const { cx, cy } = getCanvasPos(canvas, x, y);
+          const startX = cx - width / 2;
+          const startY = cy - height / 2;
+
+          ctx.fillStyle = bgColor; ctx.fillRect(startX, startY, width, height);
+          if (borderWidth > 0) { ctx.strokeStyle = borderColor; ctx.lineWidth = borderWidth; ctx.strokeRect(startX, startY, width, height); }
+
+          ctx.fillStyle = fontColor; ctx.font = `bold ${fontSize}px "Segoe UI", sans-serif`;
+          ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+          const maxTextWidth = width - padding * 2;
+          let currentY = startY + padding;
+          
+          const lines = text.split('\n');
+          for (const paragraph of lines) {
+            let currentLine = '';
+            for (const char of paragraph) {
+              const testLine = currentLine + char;
+              if (ctx.measureText(testLine).width > maxTextWidth && currentLine !== '') {
+                ctx.fillText(currentLine, startX + padding, currentY);
+                currentLine = char; currentY += fontSize * lineHeight;
+              } else { currentLine = testLine; }
+            }
+            ctx.fillText(currentLine, startX + padding, currentY);
+            currentY += fontSize * lineHeight;
+          }
+        },
+        play: (name, volume = 1.0, loop = false) => {
+          const src = loadedSounds[name];
+          if (!src) return;
+          const audio = new Audio(src); audio.volume = volume; audio.loop = loop;
+          audio.play().catch(()=>{});
+        },
+        Input: {
+          getKey: (code) => !!inputState.keys[code],
+          getKeyDown: (code) => !!(inputState.keys[code] && !inputState.prevKeys[code]),
+          getKeyUp: (code) => !!(!inputState.keys[code] && inputState.prevKeys[code]),
+          getMouse: () => ({ ...inputState.mouse }),
+          getMouseDown: () => !!(inputState.mouse.isDown && !inputState.prevMouse.isDown)
+        },
+        Math: {
+          random: (min, max) => Math.random() * (max - min) + min,
+          lerp: (a, b, t) => a + (b - a) * t,
+          clamp: (val, min, max) => Math.max(min, Math.min(max, val)),
+          deg2rad: (deg) => deg * Math.PI / 180, rad2deg: (rad) => rad * 180 / Math.PI,
+          moveForward: (x, y, angleDeg, distance) => {
+            const rad = angleDeg * Math.PI / 180;
+            // 上が+yなので sin() を足すことで上に進む
+            return { x: x + Math.cos(rad) * distance, y: y + Math.sin(rad) * distance };
+          },
+          angleBetween: (x1, y1, x2, y2) => {
+            return Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+          },
+          distance: (x1, y1, x2, y2) => {
+            return Math.hypot(x2 - x1, y2 - y1);
+          },
+          Collision: {
+            rectRect: (x1, y1, w1, h1, x2, y2, w2, h2) => {
+              return (x1 - w1/2) < (x2 + w2/2) && (x1 + w1/2) > (x2 - w2/2) && 
+                     (y1 - h1/2) < (y2 + h2/2) && (y1 + h1/2) > (y2 - h2/2);
+            },
+            circleCircle: (x1, y1, r1, x2, y2, r2) => {
+              return (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) < (r1 + r2) * (r1 + r2);
+            },
+            pointRect: (px, py, rx, ry, rw, rh) => {
+              return px >= rx - rw/2 && px <= rx + rw/2 && py >= ry - rh/2 && py <= ry + rh/2;
+            },
+            rectCircle: (rx, ry, rw, rh, cx, cy, cr) => {
+              let testX = cx; let testY = cy;
+              if (cx < rx - rw/2) testX = rx - rw/2; else if (cx > rx + rw/2) testX = rx + rw/2;
+              if (cy < ry - rh/2) testY = ry - rh/2; else if (cy > ry + rh/2) testY = ry + rh/2;
+              const distX = cx - testX; const distY = cy - testY;
+              return (distX * distX) + (distY * distY) <= (cr * cr);
+            }
+          }
+        },
+        log: customLogFn
+      };
+      return Engine;
+    };
+      
+    
+    // --- Bootstrapper ---
+    (async function init() {
+      const canvas = document.getElementById('game-canvas');
+      const ctx = canvas.getContext('2d');
+
+      const costumeData = [];
+      const soundData = [];
+
+      const loadedImages = {};
+      for (const costume of costumeData) {
+        const img = new Image(); img.src = costume.path;
+        await new Promise(r => { img.onload = r; img.onerror = r; });
+        loadedImages[costume.name] = img;
+      }
+      
+      const loadedSounds = {};
+      for (const sound of soundData) {
+        loadedSounds[sound.name] = sound.path;
+      }
+
+      const inputState = { keys: {}, prevKeys: {}, mouse: { x: 0, y: 0, isDown: false }, prevMouse: { isDown: false } };
+      const cameraState = { x: 0, y: 0, zoom: 1 };
+      const callbacks = { onClick: [], onKeyDown: [], onKeyUp: [] };
+
+      window.addEventListener('keydown', e => { inputState.keys[e.code] = true; if(!inputState.prevKeys[e.code]) callbacks.onKeyDown.forEach(cb => cb(e.code)); });
+      window.addEventListener('keyup', e => { inputState.keys[e.code] = false; callbacks.onKeyUp.forEach(cb => cb(e.code)); });
+      canvas.addEventListener('mousedown', () => { inputState.mouse.isDown = true; callbacks.onClick.forEach(cb => cb(inputState.mouse.x, inputState.mouse.y)); });
+      window.addEventListener('mouseup', () => inputState.mouse.isDown = false);
+      canvas.addEventListener('mousemove', e => {
+        const wp = getMouseWorldPosCamera(canvas, e.clientX, e.clientY, cameraState);
+        inputState.mouse.x = wp.wx; inputState.mouse.y = wp.wy;
+      });
+
+      const Engine = createEngineAPI(ctx, canvas, loadedImages, loadedSounds, inputState, cameraState, callbacks, (msg) => console.log("[Game Log]", msg));
+
+      // 読み込まれた各スクリプトにEngineを渡して実行
+      let compileError = false;
+      window._gameScripts.forEach((runUserCode, idx) => {
+        try {
+          runUserCode(Engine);
+        } catch (err) { console.error("Script Execution Error in file " + idx + ":", err); compileError = true; }
+      });
+      if(compileError) return;
+
+      const initFns = Engine._getUserInits();
+      try { initFns.forEach(fn => fn()); } catch (err) { console.error("Init Error:", err); }
+
+      const updateFns = Engine._getUserUpdates();
+      let lastTime = performance.now();
+      
+      function loop(currentTime) {
+        const dt = (currentTime - lastTime) / 1000;
+        lastTime = currentTime;
+        
+        Engine._updateEngineTime(dt);
+
+        if (updateFns.length > 0) {
+          try { updateFns.forEach(fn => fn(dt)); } catch (err) { console.error("Update Error:", err); }
+        }
+        Object.assign(inputState.prevKeys, inputState.keys);
+        inputState.prevMouse.isDown = inputState.mouse.isDown;
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  </script>
+</body>
+</html>
